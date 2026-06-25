@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LSX Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root{
+    --bg:#0a0c10; --glass:#10131a; --card:#161922; --border:#2d3442;
+    --text:#eef2f8; --sec:#96a0af; --ter:#5f6978;
+    --blue:#4696ff; --blue2:#82beff; --green:#3cd282; --red:#ff5f5f; --yellow:#ffc83c;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',system-ui,sans-serif}
+  body{background:var(--bg);color:var(--text);min-height:100vh}
+  body::before{content:'';position:fixed;inset:0;background:radial-gradient(circle at 20% 10%,rgba(70,150,255,.08),transparent 40%);pointer-events:none}
+  .wrap{max-width:1200px;margin:0 auto;padding:24px}
+  .logo{font-size:34px;font-weight:800;background:linear-gradient(90deg,#fff,var(--blue2));-webkit-background-clip:text;background-clip:text;color:transparent;display:inline-block}
+  .logo-sub{color:var(--sec);font-size:13px;margin-left:8px}
+  /* Login */
+  #login{display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column}
+  .login-card{background:var(--glass);border:1px solid var(--border);border-radius:16px;padding:32px;width:360px}
+  .login-card h2{margin-bottom:20px;font-size:18px}
+  input,select{width:100%;background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px;color:var(--text);font-size:14px;outline:none;margin-bottom:12px}
+  input:focus,select:focus{border-color:var(--blue)}
+  .btn{background:linear-gradient(90deg,var(--blue),var(--blue2));color:#08080a;border:none;
+    border-radius:10px;padding:12px 18px;font-weight:700;font-size:14px;cursor:pointer;transition:.15s}
+  .btn:hover{opacity:.88}
+  .btn-sm{padding:7px 12px;font-size:12px;border-radius:8px}
+  .btn-ghost{background:var(--card);color:var(--text);border:1px solid var(--border)}
+  .btn-red{background:var(--red);color:#fff}
+  .btn-green{background:var(--green);color:#08080a}
+  .btn-yellow{background:var(--yellow);color:#08080a}
+  .err{color:var(--red);font-size:13px;margin-top:8px;min-height:18px}
+  /* App */
+  #app{display:none}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+  .stat{background:var(--glass);border:1px solid var(--border);border-radius:12px;padding:16px}
+  .stat .n{font-size:26px;font-weight:800}
+  .stat .l{color:var(--sec);font-size:12px;margin-top:2px}
+  .toolbar{background:var(--glass);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px;
+    display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .field label{font-size:11px;color:var(--ter);font-weight:600}
+  .field input,.field select{margin:0;width:auto;min-width:120px}
+  .search{flex:1;min-width:180px}
+  table{width:100%;border-collapse:collapse;background:var(--glass);border-radius:12px;overflow:hidden}
+  th,td{text-align:left;padding:11px 12px;font-size:13px;border-bottom:1px solid var(--border)}
+  th{color:var(--ter);font-size:11px;text-transform:uppercase;font-weight:700;background:var(--card)}
+  td.key{font-family:monospace;font-size:12px}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  .pill{display:inline-block;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:700}
+  .pill.active{background:rgba(60,210,130,.15);color:var(--green)}
+  .pill.unused{background:rgba(150,160,175,.15);color:var(--sec)}
+  .pill.expired{background:rgba(255,200,60,.15);color:var(--yellow)}
+  .pill.banned{background:rgba(255,95,95,.15);color:var(--red)}
+  .row-actions{display:flex;gap:6px}
+  .muted{color:var(--ter)}
+  .copy{cursor:pointer;color:var(--blue)}
+  .toast{position:fixed;bottom:20px;right:20px;background:var(--glass);border:1px solid var(--border);
+    border-left:4px solid var(--blue);border-radius:10px;padding:14px 18px;font-size:14px;
+    transform:translateX(400px);transition:.3s;z-index:99}
+  .toast.show{transform:translateX(0)}
+  .tabs{display:flex;gap:8px;margin-bottom:16px}
+  .tab{padding:8px 16px;border-radius:8px;background:var(--card);border:1px solid var(--border);
+    cursor:pointer;font-size:13px;color:var(--sec)}
+  .tab.active{background:var(--blue);color:#08080a;font-weight:700;border-color:var(--blue)}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+
+<!-- ─── LOGIN ─── -->
+<div id="login">
+  <div style="margin-bottom:20px"><span class="logo">LSX</span><span class="logo-sub">Admin</span></div>
+  <div class="login-card">
+    <h2>Sign in</h2>
+    <input id="email" type="email" placeholder="admin@email.com" />
+    <input id="password" type="password" placeholder="Password" />
+    <button class="btn" style="width:100%" onclick="signIn()">Sign In</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- ─── APP ─── -->
+<div id="app">
+  <div class="wrap">
+    <header>
+      <div><span class="logo">LSX</span><span class="logo-sub">Admin Dashboard</span></div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="muted" id="whoami" style="font-size:13px"></span>
+        <button class="btn btn-ghost btn-sm" onclick="signOut()">Sign out</button>
+      </div>
+    </header>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="keys" onclick="switchTab('keys')">Keys</div>
+      <div class="tab" data-tab="logs" onclick="switchTab('logs')">Validation Logs</div>
+    </div>
+
+    <!-- KEYS TAB -->
+    <div id="tab-keys">
+      <div class="toolbar">
+        <div class="field">
+          <label>QUANTITY</label>
+          <input id="genQty" type="number" value="1" min="1" max="100" />
+        </div>
+        <div class="field">
+          <label>EXPIRY (days, blank = lifetime)</label>
+          <input id="genDays" type="number" placeholder="lifetime" min="1" />
+        </div>
+        <div class="field">
+          <label>NOTE</label>
+          <input id="genNote" type="text" placeholder="optional label" />
+        </div>
+        <button class="btn" onclick="genKeys()">Generate</button>
+        <div class="field search">
+          <label>SEARCH</label>
+          <input id="search" type="text" placeholder="key, username, hwid, note..." oninput="renderKeys()" />
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="loadKeys()">Refresh</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Key</th><th>Status</th><th>Roblox</th><th>HWID</th><th>Expires</th><th>Last Used</th><th>Note</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="keysBody"></tbody>
+      </table>
+    </div>
+
+    <!-- LOGS TAB -->
+    <div id="tab-logs" class="hidden">
+      <div class="toolbar">
+        <div class="field search">
+          <label>SEARCH LOGS</label>
+          <input id="logSearch" type="text" placeholder="key, username, result..." oninput="renderLogs()" />
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="loadLogs()">Refresh</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Key</th><th>Result</th><th>Roblox</th><th>HWID</th>
+        </tr></thead>
+        <tbody id="logsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ─────────── CONFIG (edit these two) ───────────
+const SUPABASE_URL  = "https://hvyyxecwyrorvtlhuzqq.supabase.co"
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh2eXl4ZWN3eXJvcnZ0bGh1enFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzNDQwNTAsImV4cCI6MjA5NzkyMDA1MH0.fDmJhr-TLfV4ZJtZPg9XB-ZFi7J9hZ1AjAYIfFop8zc"  -- safe to expose (anon, RLS-locked)
+// ────────────────────────────────────────────────
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+let KEYS = [], LOGS = [];
+
+function toast(msg, color="var(--blue)"){
+  const t = document.getElementById("toast");
+  t.style.borderLeftColor = color; t.textContent = msg;
+  t.classList.add("show"); setTimeout(()=>t.classList.remove("show"), 2600);
+}
+function copy(txt){ navigator.clipboard.writeText(txt); toast("Copied"); }
+
+// ─── AUTH ───
+async function signIn(){
+  const email = document.getElementById("email").value.trim();
+  const password = document.getElementById("password").value;
+  const errEl = document.getElementById("loginErr");
+  errEl.textContent = "";
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if(error){ errEl.textContent = error.message; return; }
+  await afterLogin();
+}
+async function signOut(){ await sb.auth.signOut(); location.reload(); }
+
+async function afterLogin(){
+  const { data:{ user } } = await sb.auth.getUser();
+  if(!user) return;
+  // verify admin
+  const { data: adminRow } = await sb.from("admins").select("user_id").eq("user_id", user.id).maybeSingle();
+  if(!adminRow){
+    document.getElementById("loginErr").textContent = "This account is not an admin.";
+    await sb.auth.signOut();
+    return;
+  }
+  document.getElementById("login").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  document.getElementById("whoami").textContent = user.email;
+  await loadKeys();
+  await loadLogs();
+}
+
+// ─── TABS ───
+function switchTab(t){
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active", x.dataset.tab===t));
+  document.getElementById("tab-keys").classList.toggle("hidden", t!=="keys");
+  document.getElementById("tab-logs").classList.toggle("hidden", t!=="logs");
+}
+
+// ─── KEYS ───
+async function loadKeys(){
+  const { data, error } = await sb.from("keys").select("*").order("created_at", { ascending:false });
+  if(error){ toast(error.message, "var(--red)"); return; }
+  KEYS = data || [];
+  renderStats(); renderKeys();
+}
+
+function keyStatus(k){
+  if(k.banned) return "banned";
+  if(k.expires_at && new Date(k.expires_at) < new Date()) return "expired";
+  if(!k.hwid) return "unused";
+  return "active";
+}
+
+function renderStats(){
+  const total = KEYS.length;
+  const active = KEYS.filter(k=>keyStatus(k)==="active").length;
+  const unused = KEYS.filter(k=>keyStatus(k)==="unused").length;
+  const banned = KEYS.filter(k=>k.banned).length;
+  const expired = KEYS.filter(k=>keyStatus(k)==="expired").length;
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><div class="n">${total}</div><div class="l">Total Keys</div></div>
+    <div class="stat"><div class="n" style="color:var(--green)">${active}</div><div class="l">Active</div></div>
+    <div class="stat"><div class="n" style="color:var(--sec)">${unused}</div><div class="l">Unused</div></div>
+    <div class="stat"><div class="n" style="color:var(--yellow)">${expired}</div><div class="l">Expired</div></div>
+    <div class="stat"><div class="n" style="color:var(--red)">${banned}</div><div class="l">Banned</div></div>`;
+}
+
+function renderKeys(){
+  const q = document.getElementById("search").value.toLowerCase();
+  const rows = KEYS.filter(k=>{
+    if(!q) return true;
+    return [k.key,k.roblox_username,k.roblox_display,k.hwid,k.note,k.roblox_userid]
+      .some(v=>String(v||"").toLowerCase().includes(q));
+  });
+  document.getElementById("keysBody").innerHTML = rows.map(k=>{
+    const st = keyStatus(k);
+    const rbx = k.roblox_username
+      ? `${k.roblox_display||k.roblox_username}<br><span class="muted">@${k.roblox_username} (${k.roblox_userid||"?"})</span>`
+      : `<span class="muted">-</span>`;
+    const hwid = k.hwid ? `<span class="copy" onclick="copy('${k.hwid}')">${k.hwid.slice(0,14)}...</span>` : `<span class="muted">unbound</span>`;
+    const exp = k.expires_at ? new Date(k.expires_at).toLocaleDateString() : `<span class="muted">lifetime</span>`;
+    const last = k.last_used ? new Date(k.last_used).toLocaleString() : `<span class="muted">never</span>`;
+    return `<tr>
+      <td class="key"><span class="copy" onclick="copy('${k.key}')">${k.key}</span></td>
+      <td><span class="pill ${st}">${st}</span></td>
+      <td>${rbx}</td>
+      <td>${hwid}</td>
+      <td>${exp}</td>
+      <td>${last}</td>
+      <td>${k.note||"-"}</td>
+      <td><div class="row-actions">
+        ${k.banned
+          ? `<button class="btn btn-green btn-sm" onclick="setBan('${k.id}',false)">Unban</button>`
+          : `<button class="btn btn-red btn-sm" onclick="setBan('${k.id}',true)">Ban</button>`}
+        <button class="btn btn-yellow btn-sm" onclick="resetHwid('${k.id}')">Reset HWID</button>
+        <button class="btn btn-ghost btn-sm" onclick="delKey('${k.id}')">Delete</button>
+      </div></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="8" class="muted" style="text-align:center;padding:24px">No keys</td></tr>`;
+}
+
+function randKey(){
+  const hex = [...crypto.getRandomValues(new Uint8Array(8))].map(b=>b.toString(16).padStart(2,"0")).join("");
+  return "LSX-" + hex.toUpperCase();
+}
+
+async function genKeys(){
+  const qty = Math.max(1, Math.min(100, parseInt(document.getElementById("genQty").value)||1));
+  const days = parseInt(document.getElementById("genDays").value);
+  const note = document.getElementById("genNote").value.trim() || null;
+  const expires = days>0 ? new Date(Date.now()+days*86400000).toISOString() : null;
+  const rows = Array.from({length:qty},()=>({ key:randKey(), expires_at:expires, note }));
+  const { error } = await sb.from("keys").insert(rows);
+  if(error){ toast(error.message,"var(--red)"); return; }
+  toast(`Generated ${qty} key(s)`, "var(--green)");
+  if(qty===1) copy(rows[0].key);
+  await loadKeys();
+}
+
+async function setBan(id, val){
+  const { error } = await sb.from("keys").update({ banned: val }).eq("id", id);
+  if(error){ toast(error.message,"var(--red)"); return; }
+  toast(val?"Banned":"Unbanned", val?"var(--red)":"var(--green)"); await loadKeys();
+}
+async function resetHwid(id){
+  const { error } = await sb.from("keys").update({ hwid: null }).eq("id", id);
+  if(error){ toast(error.message,"var(--red)"); return; }
+  toast("HWID reset","var(--yellow)"); await loadKeys();
+}
+async function delKey(id){
+  if(!confirm("Delete this key permanently?")) return;
+  const { error } = await sb.from("keys").delete().eq("id", id);
+  if(error){ toast(error.message,"var(--red)"); return; }
+  toast("Deleted","var(--red)"); await loadKeys();
+}
+
+// ─── LOGS ───
+async function loadLogs(){
+  const { data, error } = await sb.from("key_logs").select("*").order("created_at",{ascending:false}).limit(500);
+  if(error){ return; }
+  LOGS = data || []; renderLogs();
+}
+function renderLogs(){
+  const q = (document.getElementById("logSearch").value||"").toLowerCase();
+  const rows = LOGS.filter(l=>{
+    if(!q) return true;
+    return [l.key,l.roblox_username,l.result,l.hwid].some(v=>String(v||"").toLowerCase().includes(q));
+  });
+  const rc = {valid:"var(--green)",expired:"var(--yellow)",banned:"var(--red)",hwid_mismatch:"var(--red)",not_found:"var(--ter)"};
+  document.getElementById("logsBody").innerHTML = rows.map(l=>`
+    <tr>
+      <td class="muted">${new Date(l.created_at).toLocaleString()}</td>
+      <td class="key">${l.key||"-"}</td>
+      <td style="color:${rc[l.result]||"var(--text)"}">${l.result}</td>
+      <td>${l.roblox_username?`@${l.roblox_username}`:"-"}</td>
+      <td class="muted">${l.hwid?l.hwid.slice(0,14)+"...":"-"}</td>
+    </tr>`).join("") || `<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No logs</td></tr>`;
+}
+
+// ─── INIT: restore session ───
+(async()=>{
+  const { data:{ session } } = await sb.auth.getSession();
+  if(session) await afterLogin();
+})();
+</script>
+</body>
+</html>
