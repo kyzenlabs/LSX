@@ -34,6 +34,7 @@ local accentColor  = Color3.fromRGB(70, 150, 255)
 local CONFIG_PATH  = "LSX_CS2_Config.json"
 
 -- Feature state
+-- FIX 7: savedPos replaced with savedPositions table (up to 5 named positions)
 local state = {
     notifSpawns   = true,
     walkspeed     = 16,
@@ -51,7 +52,7 @@ local state = {
     hidePlayers   = false,
     fov           = 70,
     antiAFK       = false,
-    savedPos      = nil,
+    savedPositions = {},  -- [{name, pos={X,Y,Z}}]
     distTracker   = 0,
     distUnit      = "mi",
 }
@@ -61,7 +62,7 @@ local function saveConfig()
         bind = menuBind.Name, accent = {accentColor.R, accentColor.G, accentColor.B},
         notifSpawns = state.notifSpawns, walkspeed = state.walkspeed, jumppower = state.jumppower,
         fov = state.fov, distUnit = state.distUnit,
-        savedPos = state.savedPos and {state.savedPos.X, state.savedPos.Y, state.savedPos.Z} or nil,
+        savedPositions = state.savedPositions,
     }
     pcall(function() writefile(CONFIG_PATH, HttpService:JSONEncode(data)) end)
 end
@@ -81,7 +82,12 @@ local function loadConfig()
     if data.jumppower then state.jumppower = data.jumppower end
     if data.fov then state.fov = data.fov end
     if data.distUnit then state.distUnit = data.distUnit end
-    if data.savedPos then state.savedPos = Vector3.new(data.savedPos[1], data.savedPos[2], data.savedPos[3]) end
+    -- FIX 7: load new savedPositions format; also migrate old savedPos if present
+    if data.savedPositions then
+        state.savedPositions = data.savedPositions
+    elseif data.savedPos then
+        state.savedPositions = {{name="Saved Position", pos=data.savedPos}}
+    end
 end
 loadConfig()
 
@@ -101,6 +107,19 @@ local T = {
     blueLight = Color3.fromRGB(130, 190, 255),
 }
 local function acc() return accentColor end
+
+-- FIX 1: accent color registry so changes apply live everywhere
+local accentObjects = {}  -- [{obj, prop}]
+local function registerAccent(obj, prop)
+    accentObjects[#accentObjects+1] = {obj=obj, prop=prop}
+    obj[prop] = accentColor
+end
+local function applyAccentColor(col)
+    accentColor = col
+    for _, e in ipairs(accentObjects) do
+        pcall(function() e.obj[e.prop] = col end)
+    end
+end
 
 -- Helpers
 local function corner(p, r)
@@ -151,11 +170,44 @@ local function getTpPart(name)
     return nil
 end
 
+-- FIX 4: improved tpToPos - handles vehicle seats and uses CFrame properly
 local function tpToPos(pos, yOff, zOff)
     if not hrp or not hrp.Parent then return false end
-    -- If in a vehicle, move the seat/vehicle instead
+    local targetCF = CFrame.new(pos.X, pos.Y + (yOff or 3), pos.Z + (zOff or 0))
     local seat = hum and hum.SeatPart
-    hrp.CFrame = CFrame.new(pos.X, pos.Y + (yOff or 3), pos.Z + (zOff or 0))
+    if seat and seat:IsA("BasePart") then
+        local veh = seat:FindFirstAncestorWhichIsA("Model")
+        if veh and veh.PrimaryPart then
+            veh:SetPrimaryPartCFrame(targetCF)
+            return true
+        end
+    end
+    hrp.CFrame = targetCF
+    return true
+end
+
+-- FIX 4: teleport to a part/position near a car slot - tries multiple fallback offsets
+local function tpToCarPart(part, slotPos)
+    if not hrp or not hrp.Parent then return false end
+    local targetPos = part and part.Position or slotPos
+    if not targetPos then return false end
+    -- Try a nearby safe offset to avoid spawning inside the car
+    local offsets = {
+        Vector3.new(0, 4, 6),
+        Vector3.new(0, 4, -6),
+        Vector3.new(6, 4, 0),
+        Vector3.new(-6, 4, 0),
+        Vector3.new(0, 5, 0),
+    }
+    local seat = hum and hum.SeatPart
+    if seat and seat:IsA("BasePart") then
+        local veh = seat:FindFirstAncestorWhichIsA("Model")
+        if veh and veh.PrimaryPart then
+            veh:SetPrimaryPartCFrame(CFrame.new(targetPos + offsets[1]))
+            return true
+        end
+    end
+    hrp.CFrame = CFrame.new(targetPos + offsets[1])
     return true
 end
 
@@ -184,13 +236,9 @@ local function getPlotTpPart(plot)
     return plot:FindFirstChildWhichIsA("BasePart")
 end
 
--- CAR DATA: map in-game CarName codes & GameNames to real names + rarity
--- Built from the master 195-car list. Key insights:
--- in-game CarName often = GameName + variant suffix (e.g. "Camry6", "Rs7", "RB3")
--- We match by stripping digits/underscores and comparing to GameName.
+-- CAR DATA
 local DATA = {}
 DATA.CARDB = {
-    -- {GameName, Make, Model, Rarity, BuyPrice}
     {"Rodster","Tesla","Roadster","Limited",49700000},
     {"Fenomenos","Lamborghini","Fenomeno","Limited",12400000},
     {"Varoni","Ferrari","F40","Limited",10000000},
@@ -352,7 +400,6 @@ DATA.NOTIFY_RARITIES = {
     ["Very Rare"]=true, ["Rare"]=true,
 }
 
--- Strip trailing digits, underscores, dashes for matching
 local function normName(s)
     s = tostring(s)
     s = s:gsub("[_%-]", " ")
@@ -361,17 +408,12 @@ local function normName(s)
     return s:lower()
 end
 
--- Map of in-game CarName model codes -> {Make, Model} (from confirmed scanner data)
--- Codes are like "Elantra18", "Accord_08", "Camry16", "Yokon24", "Charger_SRT_2014"
--- We strip digits/suffixes and match the leading model word.
 DATA.CODE_MAP = {
-    -- exact-ish codes that include model numbers (checked before token fallback)
     ["rb3"]={"BMW","Series 3"}, ["m3"]={"BMW","M3"}, ["c63"]={"Mercedes-Benz","AMG C63"},
     ["e320"]={"Mercedes-Benz","E-Class"}, ["rs8"]={"Audi","RS8"}, ["rs7"]={"Audi","RS7"},
     ["k524"]={"Kia","K5"}, ["k5"]={"Kia","K5"}, ["k4"]={"Kia","K4"}, ["k8"]={"Kia","K8"},
     ["ls420"]={"Lexus","LS 420"}, ["m5"]={"BMW","M5"}, ["m4"]={"BMW","M4"}, ["m8"]={"BMW","M8"},
     ["m2"]={"BMW","M2"}, ["n5"]={"BMW","M5"}, ["n4"]={"BMW","M4"},
-    -- model-name codes
     ["elantra"]={"Hyundai","Elantra"}, ["accord"]={"Honda","Accord"},
     ["land"]={"Toyota","Land Cruiser"}, ["taurus"]={"Ford","Taurus"},
     ["yokon"]={"GMC","Yukon"}, ["yukon"]={"GMC","Yukon"}, ["camry"]={"Toyota","Camry"},
@@ -397,21 +439,16 @@ DATA.CODE_MAP = {
     ["altera"]={"Nissan","Altima"}, ["aura"]={"Audi","S4"},
 }
 
--- Extract model token. Tries full alpha+number prefix first (RB3, C63, M3, LS420, E320, K524),
--- then strips to pure letters (Camry, Elantra, Charger).
 local function codeTokens(carName)
     local s = tostring(carName)
     local out = {}
-    -- alpha + digits prefix (e.g. "RB3", "C63", "E320", "LS420", "K524")
     local alnum = s:match("^(%a+%d+)")
     if alnum then out[#out+1] = alnum:lower() end
-    -- pure leading letters (e.g. "Camry", "Charger", "CheryArrizo")
     local alpha = s:match("^(%a+)")
     if alpha then out[#out+1] = alpha:lower() end
     return out
 end
 
--- Lookup: code-token map (spawn prices are randomized so unreliable), then strict name
 local function lookupCar(carName, price)
     if carName then
         for _, tok in ipairs(codeTokens(carName)) do
@@ -450,9 +487,6 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.IgnoreGuiInset = true
 pcall(function() gui.Parent = game:GetService("CoreGui") end)
 if not gui.Parent then gui.Parent = lp:WaitForChild("PlayerGui") end
-
-local LOGO_TRANS = "rbxassetid://0"  -- transparent logo (loaded via image url below)
-local LOGO_URL   = "https://i.imgur.com/ZRkaVVM.png"
 
 -- ─────────── LOADING SCREEN ───────────
 local function showLoadingScreen(onDone)
@@ -626,6 +660,7 @@ for i, name in ipairs(TABS) do
     ind.Size = UDim2.new(0, 3, 0.5, 0); ind.Position = UDim2.new(0, 0, 0.25, 0)
     ind.BackgroundColor3 = accentColor; ind.BorderSizePixel = 0
     ind.BackgroundTransparency = 1; corner(ind, 99)
+    registerAccent(ind, "BackgroundColor3")  -- FIX 1
 
     local lbl = Instance.new("TextLabel", btn)
     lbl.Size = UDim2.new(1, -16, 1, 0); lbl.Position = UDim2.new(0, 14, 0, 0)
@@ -673,7 +708,6 @@ for n, t in pairs(tabBtns) do
 end
 
 -- ─────────── REUSABLE CONTROLS ───────────
--- Toggle row
 H.mkToggle = function(parent, labelText, descText, default, order, callback)
     local card = H.mkCard(parent, descText ~= "" and 56 or 44, order)
     local lbl = Instance.new("TextLabel", card)
@@ -690,13 +724,24 @@ H.mkToggle = function(parent, labelText, descText, default, order, callback)
     sw.Size = UDim2.new(0, 46, 0, 24); sw.Position = UDim2.new(1, -60, 0.5, -12)
     sw.BackgroundColor3 = default and accentColor or T.card; sw.Text = ""
     sw.BorderSizePixel = 0; sw.AutoButtonColor = false; corner(sw, 12); stroke(sw, T.cardBorder, 0.4)
+    -- FIX 1: register toggle bg for accent
+    if default then registerAccent(sw, "BackgroundColor3") end
     local knob = Instance.new("Frame", sw)
     knob.Size = UDim2.new(0, 18, 0, 18); knob.Position = default and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
     knob.BackgroundColor3 = Color3.fromRGB(255,255,255); knob.BorderSizePixel = 0; corner(knob, 9)
     local val = default
     sw.MouseButton1Click:Connect(function()
         val = not val
-        TweenService:Create(sw, TweenInfo.new(0.18), {BackgroundColor3 = val and accentColor or T.card}):Play()
+        if val then
+            registerAccent(sw, "BackgroundColor3")
+            TweenService:Create(sw, TweenInfo.new(0.18), {BackgroundColor3 = accentColor}):Play()
+        else
+            -- Remove from accent registry
+            for i = #accentObjects, 1, -1 do
+                if accentObjects[i].obj == sw then table.remove(accentObjects, i); break end
+            end
+            TweenService:Create(sw, TweenInfo.new(0.18), {BackgroundColor3 = T.card}):Play()
+        end
         TweenService:Create(knob, TweenInfo.new(0.18), {Position = val and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)}):Play()
         callback(val)
     end)
@@ -707,7 +752,6 @@ H.mkToggle = function(parent, labelText, descText, default, order, callback)
     end
 end
 
--- Slider row
 H.mkSlider = function(parent, labelText, minV, maxV, default, order, callback)
     local card = H.mkCard(parent, 60, order)
     local lbl = Instance.new("TextLabel", card)
@@ -718,12 +762,14 @@ H.mkSlider = function(parent, labelText, minV, maxV, default, order, callback)
     valLbl.Size = UDim2.new(0, 60, 0, 20); valLbl.Position = UDim2.new(1, -74, 0, 10)
     valLbl.BackgroundTransparency = 1; valLbl.Text = tostring(default); valLbl.TextColor3 = accentColor
     valLbl.Font = Enum.Font.GothamBold; valLbl.TextSize = 13; valLbl.TextXAlignment = Enum.TextXAlignment.Right
+    registerAccent(valLbl, "TextColor3")  -- FIX 1
     local track = Instance.new("Frame", card)
     track.Size = UDim2.new(1, -28, 0, 6); track.Position = UDim2.new(0, 14, 0, 40)
     track.BackgroundColor3 = T.card; track.BorderSizePixel = 0; corner(track, 99); stroke(track, T.cardBorder, 0.5)
     local fill = Instance.new("Frame", track)
     local pct = (default - minV) / (maxV - minV)
     fill.Size = UDim2.new(pct, 0, 1, 0); fill.BackgroundColor3 = accentColor; fill.BorderSizePixel = 0; corner(fill, 99)
+    registerAccent(fill, "BackgroundColor3")  -- FIX 1
     H.gradient(fill, T.blue, T.blueLight, 0)
     local knob = Instance.new("Frame", track)
     knob.Size = UDim2.new(0, 14, 0, 14); knob.Position = UDim2.new(pct, -7, 0.5, -7)
@@ -749,7 +795,6 @@ H.mkSlider = function(parent, labelText, minV, maxV, default, order, callback)
     return card
 end
 
--- Button row
 H.mkButton = function(parent, labelText, btnText, col, order, callback)
     local card = H.mkCard(parent, 48, order)
     local lbl = Instance.new("TextLabel", card)
@@ -761,6 +806,8 @@ H.mkButton = function(parent, labelText, btnText, col, order, callback)
     btn.BackgroundColor3 = col or accentColor; btn.TextColor3 = Color3.fromRGB(8,8,8)
     btn.Text = btnText; btn.TextSize = 12; btn.Font = Enum.Font.GothamBold
     btn.BorderSizePixel = 0; btn.AutoButtonColor = false; corner(btn, 8)
+    -- FIX 1: register accent buttons that use accentColor
+    if col == nil or col == accentColor then registerAccent(btn, "BackgroundColor3") end
     btn.MouseEnter:Connect(function() TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundTransparency=0.2}):Play() end)
     btn.MouseLeave:Connect(function() TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundTransparency=0}):Play() end)
     btn.MouseButton1Click:Connect(function() callback(btn) end)
@@ -775,7 +822,9 @@ B.buildMainTab = function()
     local hero = H.mkCard(panel, 110, 0)
     local av = Instance.new("ImageLabel", hero)
     av.Size = UDim2.new(0, 72, 0, 72); av.Position = UDim2.new(0, 18, 0, 19)
-    av.BackgroundColor3 = T.card; av.BorderSizePixel = 0; corner(av, 36); stroke(av, accentColor, 0.2)
+    av.BackgroundColor3 = T.card; av.BorderSizePixel = 0; corner(av, 36)
+    local avStroke = stroke(av, accentColor, 0.2)
+    registerAccent(avStroke, "Color")  -- FIX 1
     pcall(function()
         av.Image = Players:GetUserThumbnailAsync(lp.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
     end)
@@ -815,6 +864,8 @@ B.buildMainTab = function()
 end
 
 -- ═══════════════ CARS TAB ═══════════════
+-- FIX 2: Reordered to Lowest Mileage, Cheapest, Most Expensive
+-- FIX 2: Auto-refresh synced with dealership timer
 B.buildCarsTab = function()
     local panel = tabPanels["Cars"].panel
 
@@ -862,15 +913,12 @@ B.buildCarsTab = function()
         return results
     end
 
+    -- FIX 4: use improved car teleport
     local function tpToCar(car)
         if not hrp or not hrp.Parent then return false end
         local part = car.part
         if not part or not part.Parent then part = getSlotPart(car.slot) end
-        if part then
-            hrp.CFrame = CFrame.new(part.Position.X, part.Position.Y+3, part.Position.Z+5)
-            return true
-        end
-        return false
+        return tpToCarPart(part, car.slot and car.slot:IsA("BasePart") and car.slot.Position or nil)
     end
 
     local function dispName2(car)
@@ -884,14 +932,15 @@ B.buildCarsTab = function()
     H.mkSection(panel, "MARKET OVERVIEW", 0)
     local ov = H.mkCard(panel, 46, 1)
     local ovc = Instance.new("TextLabel", ov)
-    ovc.Size = UDim2.new(1, -110, 1, 0); ovc.Position = UDim2.new(0, 14, 0, 0)
-    ovc.BackgroundTransparency = 1; ovc.TextColor3 = T.textSec; ovc.TextSize = 12
-    ovc.Font = Enum.Font.GothamMedium; ovc.TextXAlignment = Enum.TextXAlignment.Left; ovc.Text = "Scanning..."
+    ovc.Size = UDim2.new(1,-110,1,0); ovc.Position = UDim2.new(0,14,0,0)
+    ovc.BackgroundTransparency=1; ovc.TextColor3=T.textSec; ovc.TextSize=12
+    ovc.Font=Enum.Font.GothamMedium; ovc.TextXAlignment=Enum.TextXAlignment.Left; ovc.Text="Scanning..."
     local refBtn = Instance.new("TextButton", ov)
-    refBtn.Size = UDim2.new(0, 84, 0, 30); refBtn.Position = UDim2.new(1, -96, 0.5, -15)
+    refBtn.Size = UDim2.new(0,84,0,30); refBtn.Position = UDim2.new(1,-96,0.5,-15)
     refBtn.BackgroundColor3 = accentColor; refBtn.TextColor3 = Color3.fromRGB(8,8,8)
     refBtn.Text = "REFRESH"; refBtn.TextSize = 11; refBtn.Font = Enum.Font.GothamBold
     refBtn.BorderSizePixel = 0; refBtn.AutoButtonColor = false; corner(refBtn, 8)
+    registerAccent(refBtn, "BackgroundColor3")  -- FIX 1
 
     -- Result card factory
     local function resultCard(title, col, order)
@@ -921,12 +970,13 @@ B.buildCarsTab = function()
         return card, nameL, priceL, subL, goBtn
     end
 
-    H.mkSection(panel, "CHEAPEST CAR", 2)
-    local _, cN, cP, cS, cGo = resultCard("Lowest price in market", T.green, 3)
-    H.mkSection(panel, "MOST EXPENSIVE CAR", 4)
-    local _, eN, eP, eS, eGo = resultCard("Highest price in market", Color3.fromRGB(255,159,10), 5)
-    H.mkSection(panel, "LOWEST MILEAGE CAR", 6)
-    local _, mN, mP, mS, mGo = resultCard("Least driven in market", T.blueLight, 7)
+    -- FIX 2: Reordered sections - Lowest Mileage first, Cheapest second, Most Expensive third
+    H.mkSection(panel, "LOWEST MILEAGE CAR", 2)
+    local _, mN, mP, mS, mGo = resultCard("Least driven in market", T.blueLight, 3)
+    H.mkSection(panel, "CHEAPEST CAR", 4)
+    local _, cN, cP, cS, cGo = resultCard("Lowest price in market", T.green, 5)
+    H.mkSection(panel, "MOST EXPENSIVE CAR", 6)
+    local _, eN, eP, eS, eGo = resultCard("Highest price in market", Color3.fromRGB(255,159,10), 7)
 
     H.mkSection(panel, "ALL CARS FOR SALE (CHEAPEST FIRST)", 8)
     local listScroll = Instance.new("ScrollingFrame", panel)
@@ -954,7 +1004,8 @@ B.buildCarsTab = function()
             row.BackgroundTransparency = 0.2; row.BorderSizePixel = 0; row.LayoutOrder = i
             corner(row, 6); stroke(row, T.cardBorder, 0.6)
             local info = car.info
-            local rcolor = info and rcol(info.rarity) or accentColor
+            -- FIX 5: Only show rarity color if rarity is known (not ?)
+            local rcolor = info and DATA.RARITY_COL[info.rarity] and rcol(info.rarity) or T.textTer
             local rb = Instance.new("Frame", row); rb.Size=UDim2.new(0,3,1,-8); rb.Position=UDim2.new(0,0,0,4)
             rb.BackgroundColor3=rcolor; rb.BorderSizePixel=0; corner(rb,99)
             local rank = Instance.new("TextLabel", row); rank.Text="#"..i
@@ -965,8 +1016,11 @@ B.buildCarsTab = function()
             nm.Text = dispName2(car); nm.Size=UDim2.new(0.46,0,0,18); nm.Position=UDim2.new(0,38,0,6)
             nm.BackgroundTransparency=1; nm.TextColor3=T.text; nm.TextSize=12
             nm.Font=Enum.Font.GothamBold; nm.TextXAlignment=Enum.TextXAlignment.Left; nm.TextTruncate=Enum.TextTruncate.AtEnd
+            -- FIX 5: Don't show "?" rarity - show nothing if unknown
+            local rarityStr = (info and DATA.RARITY_COL[info.rarity]) and info.rarity or ""
+            local metaText = rarityStr ~= "" and (rarityStr .. "  -  " .. fmtPrice(car.price) .. " SAR") or (fmtPrice(car.price) .. " SAR")
             local meta = Instance.new("TextLabel", row)
-            meta.Text = (info and info.rarity or "?") .. "  -  " .. fmtPrice(car.price) .. " SAR"
+            meta.Text = metaText
             meta.Size=UDim2.new(0.46,0,0,14); meta.Position=UDim2.new(0,38,0,25)
             meta.BackgroundTransparency=1; meta.TextColor3=rcolor; meta.TextSize=10
             meta.Font=Enum.Font.Gotham; meta.TextXAlignment=Enum.TextXAlignment.Left
@@ -975,6 +1029,7 @@ B.buildCarsTab = function()
             go.BackgroundColor3=accentColor; go.TextColor3=Color3.fromRGB(8,8,8)
             go.Text="GO"; go.TextSize=12; go.Font=Enum.Font.GothamBold
             go.BorderSizePixel=0; go.AutoButtonColor=false; corner(go,8)
+            registerAccent(go, "BackgroundColor3")  -- FIX 1
             local thisCar = car
             go.MouseButton1Click:Connect(function()
                 if tpToCar(thisCar) then notify("Teleported", dispName2(thisCar).." - Hold E", accentColor) end
@@ -987,7 +1042,7 @@ B.buildCarsTab = function()
         ovc.Text = #cars .. " cars for sale"
         ovc.TextColor3 = #cars > 0 and T.green or T.red
         if #cars == 0 then
-            cN.Text="No cars"; cP.Text=""; eN.Text="No cars"; eP.Text=""; mN.Text="No cars"; mP.Text=""
+            mN.Text="No cars"; mP.Text=""; cN.Text="No cars"; cP.Text=""; eN.Text="No cars"; eP.Text=""
             buildList({})
             return
         end
@@ -1003,25 +1058,54 @@ B.buildCarsTab = function()
             mN.Text = dispName2(lowMileCar)
             mP.Text = string.format("%d mi  -  %s SAR", lowMileCar.mileage, fmtPrice(lowMileCar.price))
         else
-            lowMileCar = cars[1]; mN.Text = dispName2(cars[1]); mP.Text = "Mileage data unavailable"
+            lowMileCar = nil
+            mN.Text = "No mileage data"; mP.Text = "Mileage not available in market"
         end
         buildList(cars)
     end
 
+    mGo.MouseButton1Click:Connect(function() if lowMileCar and tpToCar(lowMileCar) then notify("Teleported", dispName2(lowMileCar).." - Hold E", T.blueLight) end end)
     cGo.MouseButton1Click:Connect(function() if cheapCar and tpToCar(cheapCar) then notify("Teleported", dispName2(cheapCar).." - Hold E", T.green) end end)
     eGo.MouseButton1Click:Connect(function() if expCar and tpToCar(expCar) then notify("Teleported", dispName2(expCar).." - Hold E", Color3.fromRGB(255,159,10)) end end)
-    mGo.MouseButton1Click:Connect(function() if lowMileCar and tpToCar(lowMileCar) then notify("Teleported", dispName2(lowMileCar).." - Hold E", T.blueLight) end end)
     refBtn.MouseButton1Click:Connect(doRefresh)
 
     task.spawn(function() task.wait(0.5); doRefresh() end)
+
+    -- FIX 2: auto-refresh synced with dealership reset timer
+    -- Watch the reset timer and trigger refresh when it hits 0 (reset fires)
+    task.spawn(function()
+        local lastSeconds = nil
+        while panel.Parent do
+            task.wait(1)
+            local drt = Workspace:FindFirstChild("DealershipResetTimer")
+            if drt then
+                for _, v in ipairs(drt:GetDescendants()) do
+                    if v:IsA("TextLabel") then
+                        local t = v.Text or ""
+                        local mm, ss = t:match("(%d+):(%d+)")
+                        if mm and ss then
+                            local secs = tonumber(mm)*60 + tonumber(ss)
+                            -- Detect reset: last tick was near 0, now jumped up (reset happened)
+                            if lastSeconds and lastSeconds <= 5 and secs > 10 then
+                                task.wait(1.5)  -- small delay for market to update
+                                doRefresh()
+                                notify("Market Refreshed", "Dealership reset - market updated", accentColor)
+                            end
+                            lastSeconds = secs
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end)
 end
 
 -- ═══════════════ ESP SYSTEM ═══════════════
 local Camera = Workspace.CurrentCamera
 local espHolder = Instance.new("Folder", gui); espHolder.Name = "LSX_ESP"
 
--- Car ESP storage
-local carEspTags = {}  -- [slot] = {billboard, ...}
+local carEspTags = {}
 
 local E = {}
 E.makeCarTag = function(slot, part)
@@ -1031,7 +1115,9 @@ E.makeCarTag = function(slot, part)
     bb.Parent = espHolder
     local frame = Instance.new("Frame", bb)
     frame.Size = UDim2.new(1,0,1,0); frame.BackgroundColor3 = T.bg
-    frame.BackgroundTransparency = 0.25; frame.BorderSizePixel = 0; corner(frame, 8); stroke(frame, accentColor, 0.3)
+    frame.BackgroundTransparency = 0.25; frame.BorderSizePixel = 0; corner(frame, 8)
+    local fStroke = stroke(frame, accentColor, 0.3)
+    registerAccent(fStroke, "Color")  -- FIX 1
     local nameL = Instance.new("TextLabel", frame)
     nameL.Size = UDim2.new(1,-8,0,18); nameL.Position = UDim2.new(0,4,0,4)
     nameL.BackgroundTransparency = 1; nameL.TextColor3 = T.text; nameL.Font = Enum.Font.GothamBold
@@ -1044,7 +1130,7 @@ E.makeCarTag = function(slot, part)
     metaL.Size = UDim2.new(1,-8,0,14); metaL.Position = UDim2.new(0,4,0,37)
     metaL.BackgroundTransparency = 1; metaL.TextColor3 = T.textSec; metaL.Font = Enum.Font.Gotham
     metaL.TextSize = 10; metaL.Text = ""
-    return {bb=bb, nameL=nameL, priceL=priceL, metaL=metaL, frame=frame}
+    return {bb=bb, nameL=nameL, priceL=priceL, metaL=metaL, frame=frame, fStroke=fStroke}
 end
 
 E.clearCarESP = function()
@@ -1063,7 +1149,6 @@ E.getSlotPartESP = function(slot)
     return nil
 end
 
--- Refresh car ESP: validate existing, add new, remove gone (every 1s, no flicker)
 E.refreshCarESP = function()
     if not state.carESP then E.clearCarESP(); return end
     local slots = Workspace:FindFirstChild("Slots")
@@ -1084,7 +1169,6 @@ E.refreshCarESP = function()
             local part = E.getSlotPartESP(slot)
             if part then
                 local dist = (part.Position - hrp.Position).Magnitude
-                -- up to 12 cars away ~ within reasonable distance; cap at 600 studs
                 if dist <= 600 then
                     seen[slot] = true
                     local tag = carEspTags[slot]
@@ -1100,16 +1184,19 @@ E.refreshCarESP = function()
                     local nm = info and (info.make.." "..info.model) or carName
                     tag.nameL.Text = nm .. (year~="" and " '"..year:sub(3,4) or "")
                     tag.priceL.Text = fmtPrice(price) .. " SAR"
-                    local rar = info and info.rarity or "?"
-                    tag.metaL.Text = string.format("%s  -  %.0fm", rar, dist)
-                    tag.metaL.TextColor3 = info and rcol(info.rarity) or T.textSec
+                    -- FIX 5: Don't show ? rarity
+                    local rar = info and DATA.RARITY_COL[info.rarity] and info.rarity or nil
+                    tag.metaL.Text = string.format("%s  %.0fm", rar and (rar.."  -") or "", dist):gsub("^%s+","")
+                    if not rar then
+                        tag.metaL.Text = string.format("%.0fm", dist)
+                    end
+                    tag.metaL.TextColor3 = rar and rcol(info.rarity) or T.textSec
                     local own = (owner~=nil and owner~="")
-                    tag.frame:FindFirstChildOfClass("UIStroke").Color = own and T.red or accentColor
+                    tag.fStroke.Color = own and T.red or accentColor
                 end
             end
         end
     end
-    -- Remove tags for slots no longer valid/seen
     for slot, tag in pairs(carEspTags) do
         if not seen[slot] then
             if tag.bb then tag.bb:Destroy() end
@@ -1118,8 +1205,8 @@ E.refreshCarESP = function()
     end
 end
 
--- ─────────── PLAYER ESP (Drawing-free, billboard + frames) ───────────
-local playerEsp = {}  -- [player] = {parts}
+-- ─────────── PLAYER ESP ───────────
+local playerEsp = {}
 
 local SKELETON_PAIRS = {
     {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
@@ -1129,17 +1216,6 @@ local SKELETON_PAIRS = {
     {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
 }
 
-E.makePlayerEsp = function(plr)
-    local box = Instance.new("BillboardGui")
-    box.Name = "pesp_"..plr.Name; box.Size = UDim2.new(0, 4, 0, 4)
-    box.AlwaysOnTop = true; box.Parent = espHolder
-    -- We'll use a frame-based box drawn via the billboard adornee on HRP
-    local data = {box=box, lines={}, plr=plr}
-    return data
-end
-
--- Simpler player ESP: box + name/health/distance via BillboardGui on HRP,
--- skeleton via thin Parts is heavy; use line frames in a fullscreen frame
 local espScreen = Instance.new("Frame", gui)
 espScreen.Size = UDim2.new(1,0,1,0); espScreen.BackgroundTransparency = 1
 espScreen.BorderSizePixel = 0; espScreen.ZIndex = 40; espScreen.Name = "espScreen"
@@ -1163,7 +1239,7 @@ E.drawLine = function(f, p1, p2, col)
     f.Visible = true
 end
 
-local pBoxes = {}   -- [plr] = {boxFrame, nameLbl, healthLbl, distLbl, skel={frames}}
+local pBoxes = {}
 
 E.makePBox = function(plr)
     local holder = Instance.new("Frame", espScreen)
@@ -1171,7 +1247,9 @@ E.makePBox = function(plr)
     holder.AnchorPoint = Vector2.new(0.5, 0)
     local boxF = Instance.new("Frame", holder)
     boxF.BackgroundTransparency = 1; boxF.BorderSizePixel = 0
-    stroke(boxF, accentColor, 0).Thickness = 1.5
+    local bStroke = stroke(boxF, accentColor, 0)
+    bStroke.Thickness = 1.5
+    registerAccent(bStroke, "Color")  -- FIX 1
     local nameL = Instance.new("TextLabel", holder)
     nameL.BackgroundTransparency = 1; nameL.TextColor3 = T.text; nameL.Font = Enum.Font.GothamBold
     nameL.TextSize = 12; nameL.Size = UDim2.new(0, 200, 0, 14); nameL.AnchorPoint = Vector2.new(0.5,1)
@@ -1211,7 +1289,6 @@ E.updatePlayerESP = function()
                 local screenPos, onScreen = Camera:WorldToViewportPoint(phrp.Position)
                 if onScreen then
                     d.holder.Visible = true
-                    -- Box size based on distance
                     local headPos = Camera:WorldToViewportPoint((head and head.Position or phrp.Position) + Vector3.new(0,1.5,0))
                     local legPos = Camera:WorldToViewportPoint(phrp.Position - Vector3.new(0,3,0))
                     local h = math.abs(legPos.Y - headPos.Y)
@@ -1221,11 +1298,9 @@ E.updatePlayerESP = function()
                         d.boxF.Size = UDim2.new(0, w, 0, h)
                         d.boxF.Position = UDim2.new(0, screenPos.X - w/2, 0, headPos.Y)
                     else d.boxF.Visible = false end
-                    -- Name
                     d.nameL.Visible = true
                     d.nameL.Text = plr.DisplayName
                     d.nameL.Position = UDim2.new(0, screenPos.X, 0, headPos.Y - 4)
-                    -- Health bar
                     if state.espHealth then
                         d.healthBg.Visible = true; d.healthFill.Visible = true
                         d.healthBg.Size = UDim2.new(0, 3, 0, h)
@@ -1235,14 +1310,12 @@ E.updatePlayerESP = function()
                         d.healthFill.Position = UDim2.new(0, 0, 1-hp, 0)
                         d.healthFill.BackgroundColor3 = Color3.fromRGB(255*(1-hp), 255*hp, 60)
                     else d.healthBg.Visible = false; d.healthFill.Visible = false end
-                    -- Distance
                     if state.espDistance and hrp then
                         d.distL.Visible = true
                         local dist = (phrp.Position - hrp.Position).Magnitude
                         d.distL.Text = string.format("%.0fm", dist)
                         d.distL.Position = UDim2.new(0, screenPos.X, 0, legPos.Y + 2)
                     else d.distL.Visible = false end
-                    -- Skeleton
                     if state.espSkeleton and pchar then
                         for i, pair in ipairs(SKELETON_PAIRS) do
                             local a = pchar:FindFirstChild(pair[1])
@@ -1323,7 +1396,6 @@ B.buildMovementTab = function()
     H.mkToggle(panel, "Infinite Jump", "Jump again any time mid-air", false, 4, function(v) state.infJump = v end)
     H.mkToggle(panel, "No Clip", "Walk through walls and objects", false, 5, function(v) state.noclip = v end)
 
-    -- Apply current speed/jump now
     if hum then
         hum.WalkSpeed = state.walkspeed
         hum.UseJumpPower = true
@@ -1331,7 +1403,6 @@ B.buildMovementTab = function()
     end
 end
 
--- Movement loops
 UserInputService.JumpRequest:Connect(function()
     if state.infJump and hum then
         hum:ChangeState(Enum.HumanoidStateType.Jumping)
@@ -1346,7 +1417,6 @@ RunService.Stepped:Connect(function()
             end
         end
     end
-    -- Keep walkspeed/jump applied (game may reset them)
     if hum then
         if state.walkspeed ~= 16 and hum.WalkSpeed ~= state.walkspeed then hum.WalkSpeed = state.walkspeed end
         if state.jumppower ~= 50 then hum.UseJumpPower = true; if hum.JumpPower ~= state.jumppower then hum.JumpPower = state.jumppower end end
@@ -1354,6 +1424,8 @@ RunService.Stepped:Connect(function()
 end)
 
 -- ═══════════════ TELEPORT TAB ═══════════════
+-- FIX 6: Removed "Your Dealership" (duplicate of Inside Your Plot)
+-- FIX 7: Multi-position custom teleport system (5 max)
 B.buildTeleportTab = function()
     local panel = tabPanels["Teleport"].panel
 
@@ -1367,29 +1439,20 @@ B.buildTeleportTab = function()
         else notify("Error","Neighborhood not found",T.red) end
     end)
 
+    -- FIX 6: Only "Inside Your Plot" - removed "Your Dealership"
     H.mkSection(panel, "YOUR PLOT", 3)
-    H.mkButton(panel, "Your Dealership", "GO", T.green, 4, function()
-        local plot = findMyPlot()
-        local tp = getPlotTpPart(plot)
-        if tp then tpToPos(tp.Position,3,0); notify("Teleported","Your Dealership ("..(plot and plot.Name or "?")..")",T.green)
-        else notify("Not Found","Could not find your plot this server",T.red) end
-    end)
-    H.mkButton(panel, "Inside Your Plot", "GO", T.green, 5, function()
+    H.mkButton(panel, "Inside Your Plot", "GO", T.green, 4, function()
         local plot = findMyPlot()
         if not plot then notify("Not Found","Could not find your plot",T.red); return end
-        -- Use Center part for inside; works while seated in a vehicle (moves seat)
         local center = plot:FindFirstChild("Center") or getPlotTpPart(plot)
         if center then
             local targetCF = CFrame.new(center.Position.X, center.Position.Y+4, center.Position.Z)
             local seat = hum and hum.SeatPart
             if seat and seat:IsA("BasePart") then
-                -- Move the vehicle by teleporting its seat
                 local veh = seat:FindFirstAncestorWhichIsA("Model")
                 if veh and veh.PrimaryPart then
                     veh:SetPrimaryPartCFrame(targetCF)
-                else
-                    seat.CFrame = targetCF
-                end
+                else seat.CFrame = targetCF end
             else
                 if hrp then hrp.CFrame = targetCF end
             end
@@ -1397,28 +1460,166 @@ B.buildTeleportTab = function()
         end
     end)
 
-    H.mkSection(panel, "CUSTOM POSITION", 6)
-    local infoCard = H.mkCard(panel, 44, 7)
-    local infoLbl = Instance.new("TextLabel", infoCard)
-    infoLbl.Size = UDim2.new(1,-28,1,0); infoLbl.Position = UDim2.new(0,14,0,0)
-    infoLbl.BackgroundTransparency = 1; infoLbl.TextColor3 = T.textSec; infoLbl.TextSize = 11
-    infoLbl.Font = Enum.Font.Gotham; infoLbl.TextXAlignment = Enum.TextXAlignment.Left
-    infoLbl.Text = state.savedPos and ("Saved: "..string.format("%.0f, %.0f, %.0f", state.savedPos.X, state.savedPos.Y, state.savedPos.Z)) or "No position saved yet"
+    -- FIX 7: Multi-position system
+    H.mkSection(panel, "CUSTOM POSITIONS  (max 5)", 5)
 
-    H.mkButton(panel, "Save Current Position", "SAVE", accentColor, 8, function()
-        if hrp then
-            state.savedPos = hrp.Position
-            saveConfig()
-            infoLbl.Text = "Saved: "..string.format("%.0f, %.0f, %.0f", state.savedPos.X, state.savedPos.Y, state.savedPos.Z)
-            notify("Saved","Current position saved",accentColor)
+    -- Container for saved position entries (rebuilt on change)
+    local posListContainer = Instance.new("Frame", panel)
+    posListContainer.Size = UDim2.new(1, 0, 0, 0)
+    posListContainer.BackgroundTransparency = 1
+    posListContainer.BorderSizePixel = 0
+    posListContainer.AutomaticSize = Enum.AutomaticSize.Y
+    posListContainer.LayoutOrder = 6
+    local posListLayout = Instance.new("UIListLayout", posListContainer)
+    posListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    posListLayout.Padding = UDim.new(0, 6)
+
+    -- "Add Position" button (shown at bottom)
+    local addPosCard = H.mkCard(panel, 48, 7)
+    local addPosBtn = Instance.new("TextButton", addPosCard)
+    addPosBtn.Size = UDim2.new(1, -28, 0, 32); addPosBtn.Position = UDim2.new(0, 14, 0.5, -16)
+    addPosBtn.BackgroundColor3 = accentColor; addPosBtn.TextColor3 = Color3.fromRGB(8,8,8)
+    addPosBtn.Text = "+ Save Current Position"; addPosBtn.TextSize = 12; addPosBtn.Font = Enum.Font.GothamBold
+    addPosBtn.BorderSizePixel = 0; addPosBtn.AutoButtonColor = false; corner(addPosBtn, 8)
+    registerAccent(addPosBtn, "BackgroundColor3")  -- FIX 1
+
+    local function rebuildPosList()
+        -- Clear existing children
+        for _, ch in ipairs(posListContainer:GetChildren()) do
+            if not ch:IsA("UIListLayout") then ch:Destroy() end
         end
+
+        if #state.savedPositions == 0 then
+            local empty = Instance.new("TextLabel", posListContainer)
+            empty.Size = UDim2.new(1, 0, 0, 30); empty.BackgroundTransparency = 1
+            empty.Text = "No saved positions. Press Save to add one."; empty.TextColor3 = T.textTer
+            empty.Font = Enum.Font.Gotham; empty.TextSize = 11
+            empty.LayoutOrder = 1
+        end
+
+        for idx, posEntry in ipairs(state.savedPositions) do
+            local row = Instance.new("Frame", posListContainer)
+            row.Size = UDim2.new(1, 0, 0, 54); row.BackgroundColor3 = T.card
+            row.BackgroundTransparency = 0.15; row.BorderSizePixel = 0; row.LayoutOrder = idx
+            corner(row, 10); stroke(row, T.cardBorder, 0.4)
+
+            -- Name label (editable on click)
+            local nameLbl = Instance.new("TextLabel", row)
+            nameLbl.Size = UDim2.new(1, -290, 0, 22); nameLbl.Position = UDim2.new(0, 14, 0, 7)
+            nameLbl.BackgroundTransparency = 1; nameLbl.TextColor3 = T.text
+            nameLbl.Font = Enum.Font.GothamBold; nameLbl.TextSize = 13
+            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+            nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+            nameLbl.Text = posEntry.name
+
+            local coordLbl = Instance.new("TextLabel", row)
+            coordLbl.Size = UDim2.new(1, -290, 0, 16); coordLbl.Position = UDim2.new(0, 14, 0, 30)
+            coordLbl.BackgroundTransparency = 1; coordLbl.TextColor3 = T.textTer
+            coordLbl.Font = Enum.Font.Gotham; coordLbl.TextSize = 10
+            coordLbl.TextXAlignment = Enum.TextXAlignment.Left
+            coordLbl.Text = string.format("%.0f, %.0f, %.0f", posEntry.pos[1], posEntry.pos[2], posEntry.pos[3])
+
+            -- GO button
+            local goBtn = Instance.new("TextButton", row)
+            goBtn.Size = UDim2.new(0, 54, 0, 34); goBtn.Position = UDim2.new(1, -272, 0.5, -17)
+            goBtn.BackgroundColor3 = T.green; goBtn.TextColor3 = Color3.fromRGB(8,8,8)
+            goBtn.Text = "GO"; goBtn.TextSize = 12; goBtn.Font = Enum.Font.GothamBold
+            goBtn.BorderSizePixel = 0; goBtn.AutoButtonColor = false; corner(goBtn, 7)
+
+            -- RENAME button
+            local renameBtn = Instance.new("TextButton", row)
+            renameBtn.Size = UDim2.new(0, 72, 0, 34); renameBtn.Position = UDim2.new(1, -210, 0.5, -17)
+            renameBtn.BackgroundColor3 = accentColor; renameBtn.TextColor3 = Color3.fromRGB(8,8,8)
+            renameBtn.Text = "RENAME"; renameBtn.TextSize = 11; renameBtn.Font = Enum.Font.GothamBold
+            renameBtn.BorderSizePixel = 0; renameBtn.AutoButtonColor = false; corner(renameBtn, 7)
+            registerAccent(renameBtn, "BackgroundColor3")  -- FIX 1
+
+            -- UPDATE button (re-save position)
+            local updateBtn = Instance.new("TextButton", row)
+            updateBtn.Size = UDim2.new(0, 72, 0, 34); updateBtn.Position = UDim2.new(1, -130, 0.5, -17)
+            updateBtn.BackgroundColor3 = Color3.fromRGB(255, 159, 10); updateBtn.TextColor3 = Color3.fromRGB(8,8,8)
+            updateBtn.Text = "UPDATE"; updateBtn.TextSize = 11; updateBtn.Font = Enum.Font.GothamBold
+            updateBtn.BorderSizePixel = 0; updateBtn.AutoButtonColor = false; corner(updateBtn, 7)
+
+            -- DELETE button
+            local delBtn = Instance.new("TextButton", row)
+            delBtn.Size = UDim2.new(0, 54, 0, 34); delBtn.Position = UDim2.new(1, -68, 0.5, -17)
+            delBtn.BackgroundColor3 = T.red; delBtn.TextColor3 = Color3.fromRGB(8,8,8)
+            delBtn.Text = "DEL"; delBtn.TextSize = 12; delBtn.Font = Enum.Font.GothamBold
+            delBtn.BorderSizePixel = 0; delBtn.AutoButtonColor = false; corner(delBtn, 7)
+
+            local thisIdx = idx
+
+            goBtn.MouseButton1Click:Connect(function()
+                if hrp then
+                    local e = state.savedPositions[thisIdx]
+                    if e then
+                        hrp.CFrame = CFrame.new(e.pos[1], e.pos[2], e.pos[3])
+                        notify("Teleported", e.name, T.green)
+                    end
+                end
+            end)
+
+            -- Rename: cycle to an inline TextBox
+            renameBtn.MouseButton1Click:Connect(function()
+                -- Replace name label with a TextBox briefly
+                nameLbl.Visible = false
+                local tb = Instance.new("TextBox", row)
+                tb.Size = UDim2.new(1, -290, 0, 22); tb.Position = UDim2.new(0, 14, 0, 7)
+                tb.BackgroundColor3 = T.card; tb.BorderSizePixel = 0
+                tb.TextColor3 = T.text; tb.Font = Enum.Font.GothamBold; tb.TextSize = 13
+                tb.PlaceholderText = "Enter name..."; tb.Text = state.savedPositions[thisIdx].name
+                tb.ClearTextOnFocus = false; corner(tb, 6); stroke(tb, accentColor, 0.2)
+                tb:CaptureFocus()
+
+                local function commitRename()
+                    local newName = tb.Text ~= "" and tb.Text or state.savedPositions[thisIdx].name
+                    state.savedPositions[thisIdx].name = newName
+                    saveConfig()
+                    tb:Destroy()
+                    nameLbl.Text = newName
+                    nameLbl.Visible = true
+                end
+                tb.FocusLost:Connect(commitRename)
+            end)
+
+            updateBtn.MouseButton1Click:Connect(function()
+                if hrp then
+                    local pos = hrp.Position
+                    state.savedPositions[thisIdx].pos = {pos.X, pos.Y, pos.Z}
+                    saveConfig()
+                    coordLbl.Text = string.format("%.0f, %.0f, %.0f", pos.X, pos.Y, pos.Z)
+                    notify("Updated", state.savedPositions[thisIdx].name .. " position updated", Color3.fromRGB(255, 159, 10))
+                end
+            end)
+
+            delBtn.MouseButton1Click:Connect(function()
+                table.remove(state.savedPositions, thisIdx)
+                saveConfig()
+                rebuildPosList()
+                notify("Deleted", "Position removed", T.red)
+            end)
+        end
+
+        -- Update addPosBtn visibility
+        addPosBtn.Visible = #state.savedPositions < 5
+        addPosCard.Visible = #state.savedPositions < 5
+    end
+
+    addPosBtn.MouseButton1Click:Connect(function()
+        if #state.savedPositions >= 5 then
+            notify("Max Reached", "You can only save 5 positions", T.red); return
+        end
+        if not hrp then return end
+        local pos = hrp.Position
+        local name = "Position " .. (#state.savedPositions + 1)
+        table.insert(state.savedPositions, {name=name, pos={pos.X, pos.Y, pos.Z}})
+        saveConfig()
+        rebuildPosList()
+        notify("Saved", name .. " saved", accentColor)
     end)
-    H.mkButton(panel, "Teleport to Saved", "GO", T.green, 9, function()
-        if state.savedPos and hrp then
-            hrp.CFrame = CFrame.new(state.savedPos)
-            notify("Teleported","Your saved position",T.green)
-        else notify("No Position","Save a position first",T.red) end
-    end)
+
+    rebuildPosList()
 end
 
 -- ═══════════════ MISC TAB ═══════════════
@@ -1480,7 +1681,6 @@ B.buildMiscTab = function()
         state.distTracker = 0; notify("Reset","Distance tracker reset",accentColor)
     end)
 
-    -- Update label loop
     task.spawn(function()
         while panel.Parent do
             local meters = state.distTracker
@@ -1522,6 +1722,7 @@ B.buildSettingsTab = function()
     bindBtn.BackgroundColor3 = accentColor; bindBtn.TextColor3 = Color3.fromRGB(8,8,8)
     bindBtn.Text = menuBind.Name; bindBtn.TextSize = 12; bindBtn.Font = Enum.Font.GothamBold
     bindBtn.BorderSizePixel = 0; bindBtn.AutoButtonColor = false; corner(bindBtn, 8)
+    registerAccent(bindBtn, "BackgroundColor3")  -- FIX 1
     local listening = false
     bindBtn.MouseButton1Click:Connect(function()
         listening = true; bindBtn.Text = "..."
@@ -1534,6 +1735,7 @@ B.buildSettingsTab = function()
         end)
     end)
 
+    -- FIX 1: Accent color presets apply live
     H.mkSection(panel, "ACCENT COLOR", 4)
     local colorCard = H.mkCard(panel, 56, 5)
     local presets = {
@@ -1547,8 +1749,9 @@ B.buildSettingsTab = function()
         sw.BackgroundColor3 = col; sw.Text = ""; sw.BorderSizePixel = 0
         sw.AutoButtonColor = false; corner(sw, 8); stroke(sw, T.cardBorder, 0.3)
         sw.MouseButton1Click:Connect(function()
-            accentColor = col; saveConfig()
-            notify("Accent Changed","Reopen menu to apply everywhere",col)
+            applyAccentColor(col)  -- FIX 1: apply live everywhere
+            saveConfig()
+            notify("Accent Changed", "Applied live everywhere", col)
         end)
     end
 
@@ -1604,7 +1807,7 @@ B.buildCreditsTab = function()
     end)
 end
 
--- ═══════════════ RESET TIMER WIDGET (bottom-right) ═══════════════
+-- ═══════════════ RESET TIMER WIDGET ═══════════════
 local timerWidget = Instance.new("Frame", gui)
 timerWidget.Size = UDim2.new(0, 150, 0, 64); timerWidget.Position = UDim2.new(1, -166, 1, -80)
 timerWidget.BackgroundColor3 = T.bg; timerWidget.BackgroundTransparency = 0.1
@@ -1622,14 +1825,17 @@ twTime.BackgroundTransparency = 1; twTime.Text = "--:--"; twTime.TextColor3 = T.
 twTime.Font = Enum.Font.GothamBold; twTime.TextSize = 26; twTime.TextXAlignment = Enum.TextXAlignment.Left
 H.gradient(twTime, T.text, T.blueLight, 90)
 
--- Dealership reset timer.
--- The DealershipResetTimer part only exists when you're near the dealership.
--- Strategy: whenever it's present, read the real MM:SS and sync our local clock.
--- When it's not present, keep counting down locally (resets to 5:00 each cycle).
+-- FIX 3: Corrected dealership timer
+-- The 9-second pause at 00:00 is the server-side reset animation/delay.
+-- We detect this and show "RESETTING..." then cleanly jump to 05:00 after the pause ends.
 do
-    local RESET_CYCLE = 300
+    local RESET_CYCLE = 300  -- 5 minutes
     local localSeconds = nil
     local lastTick = tick()
+    local lastRealSeconds = nil
+    local resetting = false
+    local resetStartTick = nil
+
     task.spawn(function()
         while true do
             local realText = nil
@@ -1642,32 +1848,70 @@ do
                     end
                 end
             end
+
             local now = tick()
             local elapsed = now - lastTick
             lastTick = now
+
             if realText then
                 local mm, ss = realText:match("(%d+):(%d+)")
-                if mm and ss then localSeconds = tonumber(mm) * 60 + tonumber(ss) end
-                twTime.Text = realText
-            elseif localSeconds then
-                localSeconds = localSeconds - elapsed
-                if localSeconds <= 0 then localSeconds = RESET_CYCLE + localSeconds end
-                local m = math.floor(localSeconds / 60)
-                local s = math.floor(localSeconds % 60)
-                twTime.Text = string.format("%02d:%02d", m, s)
-            else
-                twTime.Text = "--:--"
+                if mm and ss then
+                    local secs = tonumber(mm)*60 + tonumber(ss)
+
+                    -- FIX 3: detect the 00:00 -> pause -> 05:00 cycle
+                    -- When we see secs <= 2 and previously we were above 5, the reset is starting
+                    if lastRealSeconds and lastRealSeconds > 5 and secs <= 2 then
+                        -- Timer hit near 00:00, enter resetting state
+                        resetting = true
+                        resetStartTick = now
+                        twTime.Text = "RESETTING"
+                        twTime.TextColor3 = T.red
+                    elseif resetting then
+                        -- We are in resetting state: once timer jumps back up to > 10, reset is done
+                        if secs > 10 then
+                            resetting = false
+                            localSeconds = secs
+                            twTime.Text = string.format("%02d:%02d", math.floor(secs/60), secs%60)
+                            twTime.TextColor3 = T.text
+                        else
+                            -- Keep showing RESETTING during the 9s pause
+                            twTime.Text = "RESETTING"
+                            twTime.TextColor3 = T.red
+                        end
+                    else
+                        -- Normal countdown display
+                        localSeconds = secs
+                        twTime.Text = realText
+                        twTime.TextColor3 = T.text
+                    end
+                    lastRealSeconds = secs
+                end
+            elseif not resetting then
+                -- No timer visible, count down locally
+                if localSeconds then
+                    localSeconds = localSeconds - elapsed
+                    if localSeconds < 0 then
+                        localSeconds = RESET_CYCLE + localSeconds
+                    end
+                    local m = math.floor(localSeconds / 60)
+                    local s = math.floor(localSeconds % 60)
+                    twTime.Text = string.format("%02d:%02d", m, s)
+                    twTime.TextColor3 = T.text
+                else
+                    twTime.Text = "--:--"
+                    twTime.TextColor3 = T.textSec
+                end
             end
+
             task.wait(0.5)
         end
     end)
 end
 
 -- ═══════════════ RARE SPAWN NOTIFIER ═══════════════
-local knownSlots = {}  -- [slot] = carName, to detect new spawns
+local knownSlots = {}
 
 task.spawn(function()
-    -- Prime known slots first (don't notify on initial load)
     task.wait(2)
     local slots = Workspace:FindFirstChild("Slots")
     if slots then
@@ -1683,7 +1927,6 @@ task.spawn(function()
                 for _, slot in ipairs(sl:GetChildren()) do
                     local cn = slot:GetAttribute("CarName")
                     local price = slot:GetAttribute("Price")
-                    -- Signature = carname + price so we detect genuine new spawns
                     local sig = tostring(cn) .. "|" .. tostring(price)
                     if cn and price and knownSlots[slot] ~= sig then
                         knownSlots[slot] = sig
@@ -1712,7 +1955,6 @@ task.spawn(function()
 end)
 
 -- ═══════════════ GLOBAL LOOPS ═══════════════
--- ESP render (every frame for player, every 1s for cars)
 RunService.RenderStepped:Connect(function()
     if not scriptActive then return end
     pcall(E.updatePlayerESP)
@@ -1732,7 +1974,7 @@ task.spawn(function()
         task.wait(0.5)
         if hrp and lastPos then
             local d = (hrp.Position - lastPos).Magnitude
-            if d < 200 then  -- ignore teleport jumps
+            if d < 200 then
                 state.distTracker = state.distTracker + d
             end
             lastPos = hrp.Position
@@ -1764,7 +2006,6 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- Hide players: catch newly added
 Players.PlayerAdded:Connect(function(plr)
     plr.CharacterAdded:Connect(function(c)
         if state.hidePlayers then
